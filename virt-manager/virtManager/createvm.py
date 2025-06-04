@@ -7,8 +7,10 @@
 import importlib
 import io
 import os
+import shutil
 import threading
 import time
+import uuid
 
 from gi.repository import Gtk
 from gi.repository import Pango
@@ -44,6 +46,8 @@ DETECT_TIMEOUT = 20
 DEFAULT_MEM = 1024
 
 (PAGE_NAME, PAGE_INSTALL, PAGE_MEM, PAGE_STORAGE, PAGE_FINISH) = range(5)
+(INSTALL_PAGE_TEMPLATE,) = range(8, 9)
+
 
 (
     INSTALL_PAGE_ISO,
@@ -54,6 +58,7 @@ DEFAULT_MEM = 1024
     INSTALL_PAGE_CONTAINER_OS,
     INSTALL_PAGE_VZ_TEMPLATE,
 ) = range(7)
+
 
 # Column numbers for os type/version list models
 (OS_COL_ID, OS_COL_LABEL, OS_COL_IS_SEP, OS_COL_IS_SHOW_ALL) = range(4)
@@ -86,6 +91,24 @@ def _pretty_memory(mem):
 def is_virt_bootstrap_installed(conn):
     ret = importlib.util.find_spec("virtBootstrap") is not None
     return ret or conn.config.CLITestOptions.fake_virtbootstrap
+
+def copy_disk_with_permissions(src, dst):
+    import subprocess
+    cmd = ["pkexec", "cp", src, dst]
+    res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if res.returncode != 0:
+        raise Exception(f"Error copiando disco con permisos elevados:\n{res.stderr}")
+
+def change_owner_to_user(dst):
+    import getpass
+    username = getpass.getuser()
+    cmd = ["pkexec", "chown", f"{username}:{username}", dst]
+    res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if res.returncode != 0:
+        raise Exception(f"Error cambiando el propietario de '{dst}':\n{res.stderr}")
+
+
+
 
 
 class _GuestData:
@@ -190,11 +213,15 @@ class vmmCreateVM(vmmGObjectUI):
     def __init__(self):
         vmmGObjectUI.__init__(self, "createvm.ui", "vmm-create")
         self._cleanup_on_app_close()
-
         self.conn = None
         self._capsinfo = None
-
         self._gdata = None
+        # ‘template-select-box’ es el ID del GtkBox que contiene la etiqueta + combo
+        self._template_box = self.widget("template-select-box")
+        # ‘template-combo’ es el ID del GtkComboBoxText donde irán las plantillas
+        self._template_combo = self.widget("template-combo")
+        # Ocultamos el contenedor entero de plantillas al inicio
+        self._template_box.hide()
 
 
 
@@ -1012,7 +1039,7 @@ class vmmCreateVM(vmmGObjectUI):
 
     def _get_config_install_page(self):
         if self.widget("method-template").get_active():
-            return INSTALL_PAGE_IMPORT
+            return INSTALL_PAGE_TEMPLATE
         if self.widget("vz-install-box").get_visible():
             if self.widget("vz-virt-type-exe").get_active():
                 return INSTALL_PAGE_VZ_TEMPLATE
@@ -1062,12 +1089,7 @@ class vmmCreateVM(vmmGObjectUI):
         return self.widget("install-oscontainer-rootpw").get_text()
 
     def _should_skip_disk_page(self):
-        return self._get_config_install_page() in [
-            INSTALL_PAGE_IMPORT,
-            INSTALL_PAGE_CONTAINER_APP,
-            INSTALL_PAGE_CONTAINER_OS,
-            INSTALL_PAGE_VZ_TEMPLATE,
-        ]
+        return self._get_config_install_page() == INSTALL_PAGE_TEMPLATE
 
     def _get_config_local_media(self, store_media=False):
         return self._mediacombo.get_path(store_media=store_media)
@@ -1158,14 +1180,10 @@ class vmmCreateVM(vmmGObjectUI):
         Llamado cada vez que se cambia el método de instalación
         (ISO, URL, Import, Template, etc).
         """
-        # Si el usuario acaba de seleccionar “Importar desde plantilla”…
         if self.widget("method-template").get_active():
-            #_method_changed Mostramos el contenedor (Box) que envuelve la etiqueta + combo
             self._template_box.show()
-            # Llenamos el combo con la lista de subcarpetas en TEMPLATES_ROOT
             self._populate_template_list()
         else:
-            # Si NO está seleccionado “template”, lo ocultamos
             self._template_box.hide()
     
     def _populate_template_list(self):
@@ -1173,21 +1191,16 @@ class vmmCreateVM(vmmGObjectUI):
         Lee TEMPLATES_ROOT y rellena self._template_combo con los nombres 
         de cada subcarpeta (plantilla) que encuentre.
         """
-        # Vaciamos todo el contenido previo del combo
         self._template_combo.remove_all()
         try:
             entries = sorted(os.listdir(TEMPLATES_ROOT))
         except FileNotFoundError:
             entries = []
 
-        # Recorremos cada elemento; si es carpeta, la añadimos al combo
         for folder in entries:
             full_path = os.path.join(TEMPLATES_ROOT, folder)
             if os.path.isdir(full_path):
-                # Añadimos solo el nombre de la carpeta, sin la ruta completa
                 self._template_combo.append_text(folder)
-
-        # Si había alguna carpeta, seleccionamos la primera por defecto
         if entries:
             self._template_combo.set_active(0)
 
@@ -1351,14 +1364,14 @@ class vmmCreateVM(vmmGObjectUI):
     ######################
 
     def _set_page_num_text(self, cur):
-        """
-        Set the 'page 1 of 4' style text in the wizard header
-        """
         cur += 1
-        final = PAGE_FINISH + 1
-        if self._should_skip_disk_page():
-            final -= 1
-            cur = min(cur, final)
+        if self._get_config_install_page() == INSTALL_PAGE_TEMPLATE:
+            final = 3  # Por ejemplo, solo 3 pasos (nombre, método, resumen)
+        else:
+            final = PAGE_FINISH + 1
+            if self._should_skip_disk_page():
+                final -= 1
+                cur = min(cur, final)
 
         page_lbl = _("Step %(current_page)d of %(max_page)d") % {
             "current_page": cur,
@@ -1407,6 +1420,9 @@ class vmmCreateVM(vmmGObjectUI):
         notebook.set_current_page(next_page)
 
     def _get_next_pagenum(self, curpage):
+        # Si estamos en modo plantilla, salta directo a la página final
+        if self._get_config_install_page() == INSTALL_PAGE_TEMPLATE:
+            return PAGE_FINISH
         next_page = curpage + 1
 
         if next_page == PAGE_STORAGE and self._should_skip_disk_page():
@@ -1418,6 +1434,12 @@ class vmmCreateVM(vmmGObjectUI):
     def _forward_clicked(self, src_ignore=None):
         notebook = self.widget("create-pages")
         curpage = notebook.get_current_page()
+
+        # Si es plantilla y estamos en la página de instalación, salta a resumen
+        if (self._get_config_install_page() == INSTALL_PAGE_TEMPLATE
+                and curpage == PAGE_INSTALL):
+            notebook.set_current_page(PAGE_FINISH)
+            return
 
         if curpage == PAGE_INSTALL:
             # Make sure we have detected the OS before validating the page
@@ -1524,6 +1546,11 @@ class vmmCreateVM(vmmGObjectUI):
         )
 
     def _validate_install_page(self):
+        # 0) Si “Importar desde plantilla” está activo, SOLO comprobar plantilla seleccionada:
+        if self._get_config_install_page() == INSTALL_PAGE_TEMPLATE:
+            if self._template_combo.get_active() < 0:
+                return self.err.val_err(_("Debes seleccionar una plantilla."))
+            return True
         
         # 1) Si “Importar desde plantilla” está activo, solo comprobamos que se haya seleccionado alguna plantilla:
         if self.widget("method-template").get_active():
@@ -1677,6 +1704,8 @@ class vmmCreateVM(vmmGObjectUI):
         return True
 
     def _validate_mem_page(self):
+        if self._get_config_install_page() == INSTALL_PAGE_TEMPLATE:
+            return True
 
         # Si “template” está activo, saltamos validación de memoria
         if self.widget("method-template").get_active():
@@ -1725,12 +1754,8 @@ class vmmCreateVM(vmmGObjectUI):
         return path, path_already_created
 
     def _validate_storage_page(self):
-
-        # Si “template” está activo, saltamos validación de almacenamiento
-        if self.widget("method-template").get_active():
+        if self._get_config_install_page() == INSTALL_PAGE_TEMPLATE:
             return True
-        
-        # Si “Importar desde plantilla” está activo, no validamos almacenamiento
         if self.widget("method-template").get_active():
             return True
 
@@ -1921,7 +1946,7 @@ class vmmCreateVM(vmmGObjectUI):
     ##########################
 
     def _finish_clicked(self, src_ignore):
-        # Validate the final page
+        # Validación final
         page = self.widget("create-pages").get_current_page()
         if self._validate(page) is not True:
             return
@@ -1929,8 +1954,8 @@ class vmmCreateVM(vmmGObjectUI):
         log.debug("Starting create finish() sequence")
         self._gdata.failed_guest = None
 
-        # ————————— Si “Importar desde plantilla” está activo  —————————
-        if self.widget("method-template").get_active():
+        # Si “Importar desde plantilla” está activo, ejecuta flujo especial:
+        if self._get_config_install_page() == INSTALL_PAGE_TEMPLATE:
             tpl_idx = self._template_combo.get_active()
             nombre_tpl = self._template_combo.get_active_text()
             log.debug(f"Crear VM a partir de plantilla: {nombre_tpl}")
@@ -1941,31 +1966,12 @@ class vmmCreateVM(vmmGObjectUI):
                 self.reset_finish_cursor()
                 self.err.show_err(_("Error al crear VM desde plantilla: %s") % str(e))
             return
-        # ——————————————————————————————————————————————————————————————————
 
-        # Si “Importar desde plantilla” está activo, ejecutamos flujo especial:
-        if self.widget("method-template").get_active():
-            tpl_idx = self._template_combo.get_active()
-            nombre_tpl = self._template_combo.get_active_text()
-            log.debug(f"Crear VM a partir de plantilla: {nombre_tpl}")
-            self.set_finish_cursor()
-            try:
-                self._create_from_template(nombre_tpl)
-            except Exception as e:
-                self.reset_finish_cursor()
-                self.err.show_err(_("Error al crear VM desde plantilla: %s") % str(e))
-            return
-        
-        # **************************************
         # Si no es “template”, ejecuta flujo normal
         try:
             guest = self._gdata.build_guest()
             installer = self._gdata.build_installer()
             self.set_finish_cursor()
-
-            # This encodes all the virtinst defaults up front, so the customize
-            # dialog actually shows disk buses, cache values, default devices,
-            # etc. Not required for straight start_install but doesn't hurt.
             installer.set_install_defaults(guest)
 
             if not self.widget("summary-customize").get_active():
@@ -1974,10 +1980,11 @@ class vmmCreateVM(vmmGObjectUI):
 
             log.debug("User requested 'customize', launching dialog")
             self._show_customize_dialog(guest, installer)
-        except Exception as e:  # pragma: no cover
+        except Exception as e:
             self.reset_finish_cursor()
             self.err.show_err(_("Error starting installation: %s") % str(e))
             return
+
 
     def _cleanup_customize_window(self):
         if not self._customize_window:
@@ -2236,219 +2243,138 @@ class vmmCreateVM(vmmGObjectUI):
                 "%s\n%s" % (err, log_stream.getvalue()),
             )
 
+
+ 
     def _create_from_template(self, nombre_tpl):
         """
-        Crea una nueva VM a partir de la plantilla indicada.
-        'nombre_tpl' es el nombre de carpeta bajo TEMPLATES_ROOT.
+        Instancia una nueva VM a partir de una plantilla.
+        1. Pide nombre de nueva VM.
+        2. Copia discos a /var/lib/libvirt/images.
+        3. Modifica XML (nombre, uuid, discos).
+        4. Define la nueva VM en libvirt.
         """
+        import os
+        import shutil
+        import xml.etree.ElementTree as ET
+        import libvirt
+        from gi.repository import Gtk
 
-        # 1) Construir la ruta completa a la carpeta de la plantilla
+        # 1. Localiza plantilla y XML
         tpl_dir = os.path.join(TEMPLATES_ROOT, nombre_tpl)
-        if not os.path.isdir(tpl_dir):
-            raise RuntimeError(_("La carpeta de plantilla no existe: %s") % tpl_dir)
+        xml_path = os.path.join(tpl_dir, "definition.xml")
+        if not os.path.exists(xml_path):
+            self._show_error(f"No se encuentra el archivo definition.xml en la plantilla '{nombre_tpl}'.")
+            return
 
-        # 2) Buscar el archivo .xml dentro de tpl_dir
-        xml_base_path = None
-        for f in os.listdir(tpl_dir):
-            if f.lower().endswith(".xml"):
-                xml_base_path = os.path.join(tpl_dir, f)
-                break
-        if not xml_base_path:
-            raise RuntimeError(_("No se encontró ningún .xml en la plantilla '%s'") % nombre_tpl)
+        # 2. Pide al usuario el nombre de la nueva VM
+        dialog = Gtk.MessageDialog(
+            parent=self if isinstance(self, Gtk.Window) else None,
+            flags=0,
+            message_type=Gtk.MessageType.QUESTION,
+            buttons=Gtk.ButtonsType.OK_CANCEL,
+            text="Nombre de la nueva máquina virtual:"
+        )
+        entry = Gtk.Entry()
+        entry.set_text(f"{nombre_tpl}-clon")
+        entry.show()
+        dialog.get_content_area().pack_end(entry, False, False, 0)
+        resp = dialog.run()
+        new_vm_name = entry.get_text()
+        dialog.destroy()
+        if resp != Gtk.ResponseType.OK or not new_vm_name.strip():
+            self._show_info("Operación cancelada por el usuario.")
+            return
+        new_vm_name = new_vm_name.strip()
 
-        # 3) Leer el XML original de la plantilla
-        with open(xml_base_path, "r", encoding="utf-8") as f:
-            xml_str = f.read()
-        root = ET.fromstring(xml_str)
-
-        #
-        # 4) Extraer <memory> y <vcpu> del XML original y volcarlos en self._gdata
-        #
-        mem_elem = root.find("memory")
-        if mem_elem is not None and mem_elem.text is not None:
-            try:
-                mem_val = int(mem_elem.text)
-                unit = mem_elem.attrib.get("unit", "KiB").lower()
-                if unit == "kib":
-                    mib = mem_val // 1024
-                    self._gdata.memory = mib * 1024
-                    self._gdata.currentMemory = mib * 1024
-                elif unit == "mib":
-                    mib = mem_val
-                    self._gdata.memory = mib * 1024
-                    self._gdata.currentMemory = mib * 1024
-                else:
-                    mib = mem_val // 1024
-                    self._gdata.memory = mib * 1024
-                    self._gdata.currentMemory = mib * 1024
-            except Exception:
-                pass
-
-        vcpu_elem = root.find("vcpu")
-        if vcpu_elem is not None and vcpu_elem.text is not None:
-            try:
-                self._gdata.vcpus = int(vcpu_elem.text)
-            except Exception:
-                pass
-
-        #
-        # 5) Crear carpeta para las imágenes QCOW2 clonadas (sin root)
-        #
-        IMAGES_DIR = os.path.expanduser("~/.local/share/virt-manager/images")
+        # 3. Procesa XML
         try:
-            os.makedirs(IMAGES_DIR, exist_ok=True)
+            tree = ET.parse(xml_path)
+            root = tree.getroot()
         except Exception as e:
-            raise RuntimeError(_("No se pudo crear carpeta de imágenes: %s") % e)
+            self._show_error(f"Error leyendo/parsing el XML de la plantilla:\n{e}")
+            return
 
-        #
-        # 6) Generar un nombre único para la VM clonada
-        #
-        ts = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
-        vm_name_nuevo = f"{nombre_tpl}-clone-{ts}"
-
-        #
-        # 7) Crear QCOW2 con backing store para cada disco
-        #
-        for disk in root.findall("./devices/disk"):
-            if disk.get("device") != "disk" or disk.get("type") != "file":
-                continue
-
-            source = disk.find("source")
-            if source is None or "file" not in source.attrib:
-                continue
-
-            orig = source.attrib["file"]
-            # 7.a) Determinar ruta real del backing
-            if os.path.exists(orig):
-                base_path = orig
-            else:
-                nombre_arch = os.path.basename(orig)
-                candidato = os.path.join(tpl_dir, nombre_arch)
-                if os.path.exists(candidato):
-                    base_path = candidato
-                else:
-                    raise RuntimeError(
-                        _("No se encontró la imagen base '%s', ni en %s ni en %s")
-                        % (orig, orig, candidato)
-                    )
-
-            # 7.b) Crear nombre para el nuevo QCOW2
-            base_name = os.path.basename(base_path)
-            new_name = f"{vm_name_nuevo}-{base_name}"
-            new_path = os.path.join(IMAGES_DIR, new_name)
-
-            # 7.c) Si existía, eliminar QCOW anterior para evitar locks
-            if os.path.exists(new_path):
-                try:
-                    os.remove(new_path)
-                except Exception as e:
-                    raise RuntimeError(
-                        _("No se pudo eliminar el QCOW anterior '%s': %s") % (new_path, e)
-                    )
-
-            # 7.d) Ejecutar qemu-img create -f qcow2 -b base_path new_path
-            cmd = [
-                "qemu-img",
-                "create",
-                "-f", "qcow2",
-                "-b", base_path,
-                "-o", "backing_fmt=qcow2",
-                new_path
-            ]
-            salida = subprocess.run(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True
-            )
-            if salida.returncode != 0:
-                raise RuntimeError(
-                    _("Error creando COW para disco \"%s\": %s") % (base_name, salida.stderr)
-                )
-
-            # 7.e) Apuntar el XML al new_path
-            source.set("file", new_path)
-
-        #
-        # 8) Modificar <name> y eliminar <uuid> si existe
-        #
+        # 4. Cambia <name> y <uuid>
         name_elem = root.find("name")
         if name_elem is not None:
-            name_elem.text = vm_name_nuevo
-
+            name_elem.text = new_vm_name
         uuid_elem = root.find("uuid")
         if uuid_elem is not None:
             root.remove(uuid_elem)
+        new_uuid_elem = ET.Element("uuid")
+        new_uuid_elem.text = str(uuid.uuid4())
+        root.insert(1, new_uuid_elem)  # Suele ir tras <name>
 
-        #
-        # 9) Eliminar interfaces que usen network="default"
-        #
-        devices = root.find("devices")
-        if devices is not None:
-            for interface in devices.findall("interface"):
-                source = interface.find("source")
-                if source is not None and source.attrib.get("network") == "default":
-                    devices.remove(interface)
+        # 5. Copia discos y actualiza rutas en el XML
+        disk_map = {}
+        for disk in root.findall("./devices/disk"):
+            if disk.get("device") == "disk" and disk.get("type") == "file":
+                source = disk.find("source")
+                if source is not None and 'file' in source.attrib:
+                    old_disk_path = source.attrib['file']
+                    old_disk_name = os.path.basename(old_disk_path)
+                    src = os.path.join(tpl_dir, old_disk_name)
+                    dst = f"/var/lib/libvirt/images/{new_vm_name}_{old_disk_name}"
+                    # Copia el disco
+                    try:
+                        shutil.copy2(src, dst)
+                    except PermissionError:
+                        try:
+                            copy_disk_with_permissions(src, dst)
+                        except Exception as e:
+                            self._show_error(f"No se pudo copiar '{src}' a '{dst}':\n{e}")
+                            return
+                    except Exception as e:
+                        self._show_error(f"No se pudo copiar '{src}' a '{dst}':\n{e}")
+                        return
+                    # Actualiza ruta en XML
+                    source.set("file", dst)
+                    disk_map[old_disk_path] = dst
 
-        #
-        # 10) Serializar el XML modificado
-        #
-        modified_xml_str = ET.tostring(root, encoding="utf-8").decode("utf-8")
+        # 6. Serializa el XML temporalmente
+        new_xml = ET.tostring(root, encoding="utf-8").decode("utf-8")
 
-        #
-        # 11) Guardar copia temporal si se desea
-        #
-        tmp_xml_path = f"/tmp/{vm_name_nuevo}.xml"
+        # 7. Define la nueva VM en libvirt
         try:
-            with open(tmp_xml_path, "w", encoding="utf-8") as f_tmp:
-                f_tmp.write(modified_xml_str)
-        except Exception:
-            pass
-
-        #
-        # 12) Conectar a libvirt://session y definir la VM
-        #
-        try:
-            libvirt_conn = libvirt.open("qemu:///session")
-            if libvirt_conn is None:
-                raise RuntimeError(_("No se pudo abrir libvirt://session"))
+            conn = libvirt.open("qemu:///system")
+            conn.defineXML(new_xml)
+            conn.close()
         except Exception as e:
-            raise RuntimeError(_("Error al conectar con libvirt de sesión: %s") % e)
+            self._show_error(f"No se pudo definir la nueva máquina en libvirt:\n{e}")
+            # Limpia discos copiados si falla
+            for d in disk_map.values():
+                if os.path.exists(d):
+                    try:
+                        os.remove(d)
+                    except Exception:
+                        pass
+            return
 
-        try:
-            new_dom = libvirt_conn.defineXML(modified_xml_str)
-            if new_dom is None:
-                raise RuntimeError(_("defineXML devolvió None"))
-        except libvirt.libvirtError as e:
-            libvirt_conn.close()
-            raise RuntimeError(_("Falló defineXML: %s") % e)
+        self._show_info(
+            f"Nueva máquina virtual '{new_vm_name}' creada correctamente a partir de la plantilla '{nombre_tpl}'."
+        )
+        self.topwin.destroy()
+    
+    def _show_error(self, message):
+        dlg = Gtk.MessageDialog(
+            parent=self if isinstance(self, Gtk.Window) else None,
+            flags=0,
+            message_type=Gtk.MessageType.ERROR,
+            buttons=Gtk.ButtonsType.OK,
+            text=message
+        )
+        dlg.run()
+        dlg.destroy()
 
-        #
-        # 13) Intentar arrancar la VM recién definida (si la red “default” no existe, se deja apagada)
-        #
-        try:
-            new_dom.create()
-        except libvirt.libvirtError as e:
-            log.debug(f"No se pudo iniciar la VM recién creada: {e}")
-        except Exception as e:
-            log.debug(f"Error inesperado al arrancar la VM: {e}")
+    def _show_info(self, message):
+        parent = self.parent if hasattr(self, "parent") and isinstance(self.parent, Gtk.Window) else None
+        dlg = Gtk.MessageDialog(
+            parent=parent,
+            flags=0,
+            message_type=Gtk.MessageType.INFO,
+            buttons=Gtk.ButtonsType.OK,
+            text=message
+        )
+        dlg.run()
+        dlg.destroy()
 
-        #
-        # 14) Cerrar conexión con libvirt-session
-        #
-        try:
-            libvirt_conn.close()
-        except Exception:
-            pass
-
-        #
-        # 15) Mostrar la ventana de detalles en Virt-Manager (si ya aparece en self.conn.list_vms())
-        #
-        uuid_nueva = new_dom.UUIDString()
-        for vm in self.conn.list_vms():
-            if vm.get_uuid() == uuid_nueva:
-                vmmVMWindow.get_instance(self, vm).show()
-                return
-
-        # Si no se encontró en self.conn.list_vms(), no hace falta llamar a .show()
-        return
