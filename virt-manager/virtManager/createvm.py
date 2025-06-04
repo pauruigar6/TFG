@@ -12,6 +12,7 @@ import threading
 import time
 import uuid
 
+from gi.repository import GLib
 from gi.repository import Gtk
 from gi.repository import Pango
 
@@ -2244,29 +2245,98 @@ class vmmCreateVM(vmmGObjectUI):
             )
 
 
- 
     def _create_from_template(self, nombre_tpl):
         """
-        Instancia una nueva VM a partir de una plantilla.
-        1. Pide nombre de nueva VM.
-        2. Copia discos a /var/lib/libvirt/images.
-        3. Modifica XML (nombre, uuid, discos).
-        4. Define la nueva VM en libvirt.
+        Instancia una nueva VM a partir de una plantilla, en segundo plano
+        para que la UI no se congele.
         """
-        import os
-        import shutil
-        import xml.etree.ElementTree as ET
-        import libvirt
-        from gi.repository import Gtk
+        def thread_func():
+            import os
+            import shutil
+            import xml.etree.ElementTree as ET
+            import libvirt
+            import uuid
 
-        # 1. Localiza plantilla y XML
-        tpl_dir = os.path.join(TEMPLATES_ROOT, nombre_tpl)
-        xml_path = os.path.join(tpl_dir, "definition.xml")
-        if not os.path.exists(xml_path):
-            self._show_error(f"No se encuentra el archivo definition.xml en la plantilla '{nombre_tpl}'.")
-            return
+            tpl_dir = os.path.join(TEMPLATES_ROOT, nombre_tpl)
+            xml_path = os.path.join(tpl_dir, "definition.xml")
+            if not os.path.exists(xml_path):
+                GLib.idle_add(self._show_error, f"No se encuentra el archivo definition.xml en la plantilla '{nombre_tpl}'.")
+                return
 
-        # 2. Pide al usuario el nombre de la nueva VM
+            # 2. Pedimos el nombre de la nueva VM ANTES de lanzar el hilo, ya que es interacción de usuario
+            # (Este fragmento debes llamarlo desde el hilo principal antes de lanzar thread_func)
+            # Si ya tienes el nombre, pásalo como argumento a thread_func, si no:
+            # Aquí se deja fuera del hilo porque necesita interacción con la UI
+
+            # 3. El resto en background:
+            try:
+                tree = ET.parse(xml_path)
+                root = tree.getroot()
+            except Exception as e:
+                GLib.idle_add(self._show_error, f"Error leyendo/parsing el XML de la plantilla:\n{e}")
+                return
+
+            # 4. Cambia <name> y <uuid>
+            name_elem = root.find("name")
+            if name_elem is not None:
+                name_elem.text = new_vm_name  # new_vm_name tiene que venir de fuera
+            uuid_elem = root.find("uuid")
+            if uuid_elem is not None:
+                root.remove(uuid_elem)
+            new_uuid_elem = ET.Element("uuid")
+            new_uuid_elem.text = str(uuid.uuid4())
+            root.insert(1, new_uuid_elem)
+
+            # 5. Copia discos y actualiza rutas en el XML
+            disk_map = {}
+            for disk in root.findall("./devices/disk"):
+                if disk.get("device") == "disk" and disk.get("type") == "file":
+                    source = disk.find("source")
+                    if source is not None and 'file' in source.attrib:
+                        old_disk_path = source.attrib['file']
+                        old_disk_name = os.path.basename(old_disk_path)
+                        src = os.path.join(tpl_dir, old_disk_name)
+                        dst = f"/var/lib/libvirt/images/{new_vm_name}_{old_disk_name}"
+                        try:
+                            shutil.copy2(src, dst)
+                        except PermissionError:
+                            try:
+                                copy_disk_with_permissions(src, dst)
+                            except Exception as e:
+                                GLib.idle_add(self._show_error, f"No se pudo copiar '{src}' a '{dst}':\n{e}")
+                                return
+                        except Exception as e:
+                            GLib.idle_add(self._show_error, f"No se pudo copiar '{src}' a '{dst}':\n{e}")
+                            return
+                        source.set("file", dst)
+                        disk_map[old_disk_path] = dst
+
+            # 6. Serializa el XML temporalmente
+            new_xml = ET.tostring(root, encoding="utf-8").decode("utf-8")
+
+            # 7. Define la nueva VM en libvirt
+            try:
+                conn = libvirt.open("qemu:///system")
+                conn.defineXML(new_xml)
+                conn.close()
+            except Exception as e:
+                GLib.idle_add(self._show_error, f"No se pudo definir la nueva máquina en libvirt:\n{e}")
+                # Limpia discos copiados si falla
+                for d in disk_map.values():
+                    if os.path.exists(d):
+                        try:
+                            os.remove(d)
+                        except Exception:
+                            pass
+                return
+
+            GLib.idle_add(
+                self._show_info,
+                f"Nueva máquina virtual '{new_vm_name}' creada correctamente a partir de la plantilla '{nombre_tpl}'."
+            )
+            GLib.idle_add(self.topwin.destroy)
+
+        # 2. Pide al usuario el nombre de la nueva VM (EN EL PRINCIPAL, antes del hilo)
         dialog = Gtk.MessageDialog(
             parent=self if isinstance(self, Gtk.Window) else None,
             flags=0,
@@ -2286,74 +2356,8 @@ class vmmCreateVM(vmmGObjectUI):
             return
         new_vm_name = new_vm_name.strip()
 
-        # 3. Procesa XML
-        try:
-            tree = ET.parse(xml_path)
-            root = tree.getroot()
-        except Exception as e:
-            self._show_error(f"Error leyendo/parsing el XML de la plantilla:\n{e}")
-            return
-
-        # 4. Cambia <name> y <uuid>
-        name_elem = root.find("name")
-        if name_elem is not None:
-            name_elem.text = new_vm_name
-        uuid_elem = root.find("uuid")
-        if uuid_elem is not None:
-            root.remove(uuid_elem)
-        new_uuid_elem = ET.Element("uuid")
-        new_uuid_elem.text = str(uuid.uuid4())
-        root.insert(1, new_uuid_elem)  # Suele ir tras <name>
-
-        # 5. Copia discos y actualiza rutas en el XML
-        disk_map = {}
-        for disk in root.findall("./devices/disk"):
-            if disk.get("device") == "disk" and disk.get("type") == "file":
-                source = disk.find("source")
-                if source is not None and 'file' in source.attrib:
-                    old_disk_path = source.attrib['file']
-                    old_disk_name = os.path.basename(old_disk_path)
-                    src = os.path.join(tpl_dir, old_disk_name)
-                    dst = f"/var/lib/libvirt/images/{new_vm_name}_{old_disk_name}"
-                    # Copia el disco
-                    try:
-                        shutil.copy2(src, dst)
-                    except PermissionError:
-                        try:
-                            copy_disk_with_permissions(src, dst)
-                        except Exception as e:
-                            self._show_error(f"No se pudo copiar '{src}' a '{dst}':\n{e}")
-                            return
-                    except Exception as e:
-                        self._show_error(f"No se pudo copiar '{src}' a '{dst}':\n{e}")
-                        return
-                    # Actualiza ruta en XML
-                    source.set("file", dst)
-                    disk_map[old_disk_path] = dst
-
-        # 6. Serializa el XML temporalmente
-        new_xml = ET.tostring(root, encoding="utf-8").decode("utf-8")
-
-        # 7. Define la nueva VM en libvirt
-        try:
-            conn = libvirt.open("qemu:///system")
-            conn.defineXML(new_xml)
-            conn.close()
-        except Exception as e:
-            self._show_error(f"No se pudo definir la nueva máquina en libvirt:\n{e}")
-            # Limpia discos copiados si falla
-            for d in disk_map.values():
-                if os.path.exists(d):
-                    try:
-                        os.remove(d)
-                    except Exception:
-                        pass
-            return
-
-        self._show_info(
-            f"Nueva máquina virtual '{new_vm_name}' creada correctamente a partir de la plantilla '{nombre_tpl}'."
-        )
-        self.topwin.destroy()
+        # 3. Lanza el hilo real de clonación
+        threading.Thread(target=thread_func, daemon=True).start()
     
     def _show_error(self, message):
         dlg = Gtk.MessageDialog(
@@ -2367,9 +2371,8 @@ class vmmCreateVM(vmmGObjectUI):
         dlg.destroy()
 
     def _show_info(self, message):
-        parent = self.parent if hasattr(self, "parent") and isinstance(self.parent, Gtk.Window) else None
         dlg = Gtk.MessageDialog(
-            parent=parent,
+            parent=self if isinstance(self, Gtk.Window) else None,
             flags=0,
             message_type=Gtk.MessageType.INFO,
             buttons=Gtk.ButtonsType.OK,
