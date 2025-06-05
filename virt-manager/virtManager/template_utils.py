@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 #
-# template_manager.py: funciones para 'convertir en plantilla' e 'importar desde plantilla'
+# template_utils.py: funciones para 'convertir en plantilla' e 'importar desde plantilla'
 #
 import os
 import shutil
@@ -12,6 +12,7 @@ from gi.repository import Gtk, GLib
 import libvirt
 import getpass
 import threading
+import time
 
 # Carpeta donde se almacenan las plantillas (en el home, siempre sin root)
 TEMPLATES_ROOT = os.path.expanduser("~/.local/share/virt-manager/templates")
@@ -58,112 +59,149 @@ def convert_vm_to_template_dialog(parent_window, vm):
 class TemplateManager:
     def __init__(self, parent_window):
         self.parent = parent_window
+        self.topwin = parent_window if isinstance(parent_window, Gtk.Window) else None
+        self._progress_dialog = None
+        self._progress_label = None
+        self._progress_bar = None
+        self._last_confirmation = None
 
     def convert_vm_to_template(self, vm_name, template_name=None):
-        # Lanza todo el proceso en un hilo para que la UI no se congele
-        threading.Thread(
-            target=self._convert_vm_to_template_thread,
-            args=(vm_name, template_name)
-        ).start()
+        # Muestra la barra de progreso antes de lanzar el hilo
+        GLib.idle_add(self._show_progress_bar_dialog, "Preparando conversión a plantilla…")
+        def start_thread():
+            threading.Thread(
+                target=self._convert_vm_to_template_thread,
+                args=(vm_name, template_name)
+            ).start()
+            return False
+        GLib.idle_add(start_thread)
+
+    def _show_progress_bar_dialog(self, mensaje_inicial):
+        dialog = Gtk.Dialog(
+            title="Convirtiendo en plantilla",
+            transient_for=self.topwin,
+            modal=True,
+            destroy_with_parent=True,
+        )
+        dialog.set_deletable(False)
+        dialog.set_resizable(False)
+        dialog.set_border_width(16)
+
+        vbox = dialog.get_content_area()
+        label = Gtk.Label(label=mensaje_inicial)
+        label.set_margin_bottom(12)
+        progressbar = Gtk.ProgressBar()
+        progressbar.set_show_text(True)
+        progressbar.set_fraction(0.0)
+        vbox.pack_start(label, False, False, 0)
+        vbox.pack_start(progressbar, False, False, 0)
+        dialog.show_all()
+
+        self._progress_dialog = dialog
+        self._progress_label = label
+        self._progress_bar = progressbar
+
+    def _update_progress(self, fraction, mensaje=None):
+        if self._progress_bar:
+            self._progress_bar.set_fraction(fraction)
+            if mensaje:
+                self._progress_bar.set_text(mensaje)
+        if mensaje and self._progress_label:
+            self._progress_label.set_text(mensaje)
+
+    def _close_progress_dialog(self):
+        if self._progress_dialog:
+            self._progress_dialog.destroy()
+            self._progress_dialog = None
 
     def _convert_vm_to_template_thread(self, vm_name, template_name=None):
-        """
-        Convierte una VM en plantilla, guardando definición y discos en HOME.
-        Usa permisos elevados para copiar discos aunque estén fuera del HOME.
-        Este método se ejecuta en un hilo separado.
-        """
-        if not template_name:
-            template_name = vm_name  # Por defecto, usa el nombre de la VM
-
-        template_dir = os.path.join(TEMPLATES_ROOT, template_name)
-        if os.path.isdir(template_dir):
-            # Pregunta al usuario en el hilo principal
-            res = GLib.idle_add(
-                self._ask_confirmation,
-                f"Ya existe una plantilla llamada '{template_name}'.\n"
-                "¿Deseas sobrescribirla? Esto eliminará la anterior."
-            )
-            # Espera respuesta (bloqueante)
-            import time
-            for _ in range(1000):
-                if isinstance(res, bool):
-                    respuesta = res
-                    break
-                time.sleep(0.01)
-                res = getattr(self, '_last_confirmation', None)
-            else:
-                GLib.idle_add(self._show_error, "Timeout esperando respuesta del usuario.")
-                return
-            if not respuesta:
-                return
-            shutil.rmtree(template_dir)
-
         try:
+            if not template_name:
+                template_name = vm_name
+
+            template_dir = os.path.join(TEMPLATES_ROOT, template_name)
+            if os.path.isdir(template_dir):
+                res = GLib.idle_add(
+                    self._ask_confirmation,
+                    f"Ya existe una plantilla llamada '{template_name}'.\n"
+                    "¿Deseas sobrescribirla? Esto eliminará la anterior."
+                )
+                # Espera respuesta (bloqueante)
+                respuesta = None
+                for _ in range(1000):
+                    respuesta = getattr(self, '_last_confirmation', None)
+                    if isinstance(respuesta, bool):
+                        break
+                    time.sleep(0.01)
+                else:
+                    GLib.idle_add(self._close_progress_dialog)
+                    GLib.idle_add(self._show_error, "Timeout esperando respuesta del usuario.")
+                    return
+                if not respuesta:
+                    GLib.idle_add(self._close_progress_dialog)
+                    return
+                shutil.rmtree(template_dir)
+
+            GLib.idle_add(self._update_progress, 0.05, "Creando carpeta para la plantilla…")
             os.makedirs(template_dir)
-        except Exception as e:
-            GLib.idle_add(self._show_error, f"No se pudo crear la carpeta de la plantilla:\n{e}")
-            return
 
-        # --- Paso 2: Obtener XML de la VM desde ambas conexiones ---
-        try:
+            GLib.idle_add(self._update_progress, 0.15, "Obteniendo XML de la máquina virtual…")
             dom, domain_uri = get_domain_by_name(vm_name)
             if dom is None:
                 raise RuntimeError(f"No se encontró ninguna VM llamada '{vm_name}' ni en sesión ni en sistema.")
             xml_desc = dom.XMLDesc(0)
-        except Exception as e:
-            GLib.idle_add(self._show_error, f"Error al obtener el XML de '{vm_name}':\n{e}")
-            shutil.rmtree(template_dir)
-            return
 
-        # --- Paso 3: Revisar discos (permitimos cualquiera, copiamos con permisos si hace falta) ---
-        try:
+            GLib.idle_add(self._update_progress, 0.25, "Analizando definición de la VM…")
             root = ET.fromstring(xml_desc)
-        except Exception as e:
-            GLib.idle_add(self._show_error, f"Error al parsear el XML de '{vm_name}':\n{e}")
-            shutil.rmtree(template_dir)
-            return
 
-        disk_paths = []
-        for disk in root.findall("./devices/disk"):
-            if disk.get("device") == "disk" and disk.get("type") == "file":
-                source = disk.find("source")
-                if source is not None and 'file' in source.attrib:
-                    path = source.attrib['file']
-                    if os.path.isfile(path):
-                        disk_paths.append(path)
+            disk_paths = []
+            for disk in root.findall("./devices/disk"):
+                if disk.get("device") == "disk" and disk.get("type") == "file":
+                    source = disk.find("source")
+                    if source is not None and 'file' in source.attrib:
+                        path = source.attrib['file']
+                        if os.path.isfile(path):
+                            disk_paths.append(path)
 
-        # --- Paso 4: Copiar discos a la plantilla SIEMPRE usando pkexec ---
-        for src in disk_paths:
-            nombre = os.path.basename(src)
-            dst = os.path.join(template_dir, nombre)
-            try:
-                copy_disk_with_permissions(src, dst)
-                change_owner_to_user(dst)
-            except Exception as e:
-                GLib.idle_add(self._show_error, f"No se pudo copiar el disco '{src}' con permisos elevados:\n{e}")
-                shutil.rmtree(template_dir)
-                return
+            num_disks = len(disk_paths)
+            for idx, src in enumerate(disk_paths):
+                nombre = os.path.basename(src)
+                dst = os.path.join(template_dir, nombre)
+                mensaje = f"Convirtiendo en plantilla {idx+1}/{num_disks}: {nombre}…"
+                progreso = 0.30 + 0.50 * ((idx+1)/max(num_disks,1))
+                GLib.idle_add(self._update_progress, progreso, mensaje)
+                try:
+                    copy_disk_with_permissions(src, dst)
+                    change_owner_to_user(dst)
+                except Exception as e:
+                    GLib.idle_add(self._close_progress_dialog)
+                    GLib.idle_add(self._show_error, f"No se pudo copiar el disco '{src}' con permisos elevados:\n{e}")
+                    shutil.rmtree(template_dir)
+                    return
 
-        # --- Paso 5: Guardar el XML como definition.xml ---
-        xml_path = os.path.join(template_dir, 'definition.xml')
-        try:
+            GLib.idle_add(self._update_progress, 0.85, "Guardando definición XML…")
+            xml_path = os.path.join(template_dir, 'definition.xml')
             with open(xml_path, 'w', encoding="utf-8") as f_xml:
                 f_xml.write(xml_desc)
-        except Exception as e:
-            GLib.idle_add(self._show_error, f"No se pudo escribir definition.xml:\n{e}")
-            shutil.rmtree(template_dir)
-            return
 
-        GLib.idle_add(
-            self._show_info,
-            f"La máquina '{vm_name}' se ha convertido en plantilla con éxito.\n"
-            f"Puedes encontrarla en:\n{template_dir}"
-        )
-        return
+            GLib.idle_add(self._update_progress, 1.0, "¡Plantilla creada con éxito!")
+            time.sleep(0.5)
+            GLib.idle_add(self._close_progress_dialog)
+            GLib.idle_add(
+                self._show_info,
+                f"La máquina '{vm_name}' se ha convertido en plantilla con éxito.\n"
+                f"Puedes encontrarla en:\n{template_dir}"
+            )
+        except Exception as e:
+            GLib.idle_add(self._close_progress_dialog)
+            GLib.idle_add(self._show_error, str(e))
+            if 'template_dir' in locals() and os.path.exists(template_dir):
+                shutil.rmtree(template_dir)
+            return
 
     # Métodos auxiliares para mostrar diálogos GTK (deben llamarse desde el hilo principal)
     def _ask_confirmation(self, message):
-        parent = self.parent if isinstance(self.parent, Gtk.Window) else None
+        parent = self.topwin
         dlg = Gtk.MessageDialog(
             parent=parent,
             flags=0,
@@ -177,7 +215,7 @@ class TemplateManager:
         return self._last_confirmation
 
     def _show_error(self, message):
-        parent = self.parent if isinstance(self.parent, Gtk.Window) else None
+        parent = self.topwin
         dlg = Gtk.MessageDialog(
             parent=parent,
             flags=0,
@@ -189,7 +227,7 @@ class TemplateManager:
         dlg.destroy()
 
     def _show_info(self, message):
-        parent = self.parent if isinstance(self.parent, Gtk.Window) else None
+        parent = self.topwin
         dlg = Gtk.MessageDialog(
             parent=parent,
             flags=0,

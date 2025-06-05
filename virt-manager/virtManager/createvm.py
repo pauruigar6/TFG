@@ -1365,21 +1365,40 @@ class vmmCreateVM(vmmGObjectUI):
     ######################
 
     def _set_page_num_text(self, cur):
-        cur += 1
+        # Si es modo plantilla, fuerza el número de pasos y el índice actual
         if self._get_config_install_page() == INSTALL_PAGE_TEMPLATE:
-            final = 3  # Por ejemplo, solo 3 pasos (nombre, método, resumen)
+            # En el flujo de plantilla solo hay dos pasos
+            final = 2
+
+            # Determina en qué paso estamos:
+            #  - Si estamos en PAGE_INSTALL (la pantalla para elegir plantilla), es el paso 1
+            #  - Si estamos en PAGE_FINISH (resumen/final), es el paso 2
+            # cur aquí es el índice real del GtkNotebook, pero para el flujo de plantilla salta de 1 a 4 (o 5)
+            # Necesitamos mapearlo a 1 ó 2
+            notebook = self.widget("create-pages")
+            page_widget = notebook.get_nth_page(cur)
+            # Puedes comparar por el nombre del widget o por el índice
+            # Suponiendo que PAGE_INSTALL y PAGE_FINISH son los dos únicos usados aquí:
+            if cur == PAGE_INSTALL:
+                current_page = 1
+            elif cur == PAGE_FINISH:
+                current_page = 2
+            else:
+                current_page = 1  # fallback seguro
         else:
+            cur += 1
             final = PAGE_FINISH + 1
             if self._should_skip_disk_page():
                 final -= 1
                 cur = min(cur, final)
+            current_page = cur
 
-        page_lbl = _("Step %(current_page)d of %(max_page)d") % {
-            "current_page": cur,
+        page_lbl = _("Etapa %(current_page)d de %(max_page)d") % {
+            "current_page": current_page,
             "max_page": final,
         }
-
         self.widget("header-pagenum").set_markup(page_lbl)
+
 
     def _change_os_detect(self, sensitive):
         self._os_list.set_sensitive(sensitive)
@@ -2248,8 +2267,17 @@ class vmmCreateVM(vmmGObjectUI):
     def _create_from_template(self, nombre_tpl):
         """
         Instancia una nueva VM a partir de una plantilla, en segundo plano
-        para que la UI no se congele.
+        para que la UI no se congele, mostrando una barra de progreso.
         """
+        # 1. Usar el nombre introducido por el usuario en el asistente
+        new_vm_name = self._get_config_name().strip()
+        if not new_vm_name:
+            self._show_error(_("El nombre de la máquina virtual no puede estar vacío."))
+            return
+
+        # 2. Muestra la barra de progreso antes de lanzar el hilo
+        self._show_progress_bar_dialog(_("Clonando la plantilla '%s', por favor espera...") % nombre_tpl)
+
         def thread_func():
             import os
             import shutil
@@ -2260,26 +2288,24 @@ class vmmCreateVM(vmmGObjectUI):
             tpl_dir = os.path.join(TEMPLATES_ROOT, nombre_tpl)
             xml_path = os.path.join(tpl_dir, "definition.xml")
             if not os.path.exists(xml_path):
+                GLib.idle_add(self._progress_dialog.destroy)
                 GLib.idle_add(self._show_error, f"No se encuentra el archivo definition.xml en la plantilla '{nombre_tpl}'.")
                 return
 
-            # 2. Pedimos el nombre de la nueva VM ANTES de lanzar el hilo, ya que es interacción de usuario
-            # (Este fragmento debes llamarlo desde el hilo principal antes de lanzar thread_func)
-            # Si ya tienes el nombre, pásalo como argumento a thread_func, si no:
-            # Aquí se deja fuera del hilo porque necesita interacción con la UI
-
-            # 3. El resto en background:
             try:
                 tree = ET.parse(xml_path)
                 root = tree.getroot()
             except Exception as e:
+                GLib.idle_add(self._progress_dialog.destroy)
                 GLib.idle_add(self._show_error, f"Error leyendo/parsing el XML de la plantilla:\n{e}")
                 return
 
-            # 4. Cambia <name> y <uuid>
+            # Progreso 10%
+            GLib.idle_add(self._update_progress, 0.10, _("Preparando definición de la máquina..."))
+
             name_elem = root.find("name")
             if name_elem is not None:
-                name_elem.text = new_vm_name  # new_vm_name tiene que venir de fuera
+                name_elem.text = new_vm_name
             uuid_elem = root.find("uuid")
             if uuid_elem is not None:
                 root.remove(uuid_elem)
@@ -2287,41 +2313,50 @@ class vmmCreateVM(vmmGObjectUI):
             new_uuid_elem.text = str(uuid.uuid4())
             root.insert(1, new_uuid_elem)
 
-            # 5. Copia discos y actualiza rutas en el XML
+            # Copia discos y actualiza rutas en el XML
+            disks = [disk for disk in root.findall("./devices/disk")
+                    if disk.get("device") == "disk" and disk.get("type") == "file"]
+            num_disks = len(disks)
             disk_map = {}
-            for disk in root.findall("./devices/disk"):
-                if disk.get("device") == "disk" and disk.get("type") == "file":
-                    source = disk.find("source")
-                    if source is not None and 'file' in source.attrib:
-                        old_disk_path = source.attrib['file']
-                        old_disk_name = os.path.basename(old_disk_path)
-                        src = os.path.join(tpl_dir, old_disk_name)
-                        dst = f"/var/lib/libvirt/images/{new_vm_name}_{old_disk_name}"
+
+            for idx, disk in enumerate(disks):
+                source = disk.find("source")
+                if source is not None and 'file' in source.attrib:
+                    old_disk_path = source.attrib['file']
+                    old_disk_name = os.path.basename(old_disk_path)
+                    src = os.path.join(tpl_dir, old_disk_name)
+                    dst = f"/var/lib/libvirt/images/{new_vm_name}_{old_disk_name}"
+                    # Progreso dinámico (20% + 70%*avance)
+                    progress = 0.20 + 0.70 * ((idx+1)/max(num_disks,1))
+                    mensaje = _("Copiando disco %d/%d: %s...") % (idx+1, num_disks, old_disk_name)
+                    GLib.idle_add(self._update_progress, progress, mensaje)
+                    try:
+                        shutil.copy2(src, dst)
+                    except PermissionError:
                         try:
-                            shutil.copy2(src, dst)
-                        except PermissionError:
-                            try:
-                                copy_disk_with_permissions(src, dst)
-                            except Exception as e:
-                                GLib.idle_add(self._show_error, f"No se pudo copiar '{src}' a '{dst}':\n{e}")
-                                return
+                            copy_disk_with_permissions(src, dst)
                         except Exception as e:
+                            GLib.idle_add(self._progress_dialog.destroy)
                             GLib.idle_add(self._show_error, f"No se pudo copiar '{src}' a '{dst}':\n{e}")
                             return
-                        source.set("file", dst)
-                        disk_map[old_disk_path] = dst
+                    except Exception as e:
+                        GLib.idle_add(self._progress_dialog.destroy)
+                        GLib.idle_add(self._show_error, f"No se pudo copiar '{src}' a '{dst}':\n{e}")
+                        return
+                    source.set("file", dst)
+                    disk_map[old_disk_path] = dst
 
-            # 6. Serializa el XML temporalmente
+            # Progreso 95%
+            GLib.idle_add(self._update_progress, 0.95, _("Definiendo la máquina en libvirt..."))
+
             new_xml = ET.tostring(root, encoding="utf-8").decode("utf-8")
-
-            # 7. Define la nueva VM en libvirt
             try:
                 conn = libvirt.open("qemu:///system")
                 conn.defineXML(new_xml)
                 conn.close()
             except Exception as e:
+                GLib.idle_add(self._progress_dialog.destroy)
                 GLib.idle_add(self._show_error, f"No se pudo definir la nueva máquina en libvirt:\n{e}")
-                # Limpia discos copiados si falla
                 for d in disk_map.values():
                     if os.path.exists(d):
                         try:
@@ -2330,34 +2365,14 @@ class vmmCreateVM(vmmGObjectUI):
                             pass
                 return
 
-            GLib.idle_add(
-                self._show_info,
-                f"Nueva máquina virtual '{new_vm_name}' creada correctamente a partir de la plantilla '{nombre_tpl}'."
-            )
+            # Progreso 100%
+            GLib.idle_add(self._update_progress, 1.0, _("¡Clonación completada!"))
+            GLib.idle_add(self._progress_dialog.destroy)
+            GLib.idle_add(self._show_info, f"Nueva máquina virtual '{new_vm_name}' creada correctamente a partir de la plantilla '{nombre_tpl}'.")
             GLib.idle_add(self.topwin.destroy)
 
-        # 2. Pide al usuario el nombre de la nueva VM (EN EL PRINCIPAL, antes del hilo)
-        dialog = Gtk.MessageDialog(
-            parent=self if isinstance(self, Gtk.Window) else None,
-            flags=0,
-            message_type=Gtk.MessageType.QUESTION,
-            buttons=Gtk.ButtonsType.OK_CANCEL,
-            text="Nombre de la nueva máquina virtual:"
-        )
-        entry = Gtk.Entry()
-        entry.set_text(f"{nombre_tpl}-clon")
-        entry.show()
-        dialog.get_content_area().pack_end(entry, False, False, 0)
-        resp = dialog.run()
-        new_vm_name = entry.get_text()
-        dialog.destroy()
-        if resp != Gtk.ResponseType.OK or not new_vm_name.strip():
-            self._show_info("Operación cancelada por el usuario.")
-            return
-        new_vm_name = new_vm_name.strip()
-
-        # 3. Lanza el hilo real de clonación
         threading.Thread(target=thread_func, daemon=True).start()
+
     
     def _show_error(self, message):
         dlg = Gtk.MessageDialog(
@@ -2380,4 +2395,39 @@ class vmmCreateVM(vmmGObjectUI):
         )
         dlg.run()
         dlg.destroy()
+
+    def _show_progress_bar_dialog(self, mensaje_inicial):
+        dialog = Gtk.Dialog(
+            title=_("Clonando máquina virtual"),
+            transient_for=self.topwin,
+            modal=True,
+            destroy_with_parent=True,
+        )
+        dialog.set_deletable(False)
+        dialog.set_resizable(False)
+        dialog.set_border_width(16)
+
+        vbox = dialog.get_content_area()
+        label = Gtk.Label(label=mensaje_inicial)
+        label.set_margin_bottom(12)
+        progressbar = Gtk.ProgressBar()
+        progressbar.set_show_text(True)
+        progressbar.set_fraction(0.0)
+        vbox.pack_start(label, False, False, 0)
+        vbox.pack_start(progressbar, False, False, 0)
+        dialog.show_all()
+
+        self._progress_dialog = dialog
+        self._progress_label = label
+        self._progress_bar = progressbar
+
+    def _update_progress(self, fraction, mensaje=None):
+        if hasattr(self, "_progress_bar") and self._progress_bar:
+            self._progress_bar.set_fraction(fraction)
+            if mensaje:
+                self._progress_bar.set_text(mensaje)
+        if mensaje and hasattr(self, "_progress_label") and self._progress_label:
+            self._progress_label.set_text(mensaje)
+
+
 
