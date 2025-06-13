@@ -21,6 +21,19 @@ aportando funcionalidades adicionales a Virt-Manager para usuarios técnicos y n
 
 ---
 
+## Estructura del proyecto
+
+- **TFG/**: Carpeta raíz de entrega para el ZIP final 
+  - **código/**: Código fuente y scripts de preparación 
+    - `install.sh`: Script de instalación de dependencias y entorno 
+    - `compila.txt`: Instrucciones de preparación del entorno 
+    - `virt-manager/`: Código de la extensión GTK 
+  - **ejecutable/**: Archivos listos para ejecución 
+    - `ejecuta.txt`: Instrucciones de lanzamiento de la aplicación 
+    - `virt-manager/`
+
+---
+
 ## Requisitos
 
 - **Sistema operativo**: Linux (desarrollado y probado en Ubuntu 22.04/24.04)
@@ -33,68 +46,93 @@ aportando funcionalidades adicionales a Virt-Manager para usuarios técnicos y n
 
 ---
 
-## Instalación
+## Instalación y preparación
 
-1. **Clona el repositorio:**
+1. **Navega al directorio de código** 
+   ```bash
+   cd código
+   ```
 
-    ```bash
-    git clone https://github.com/pauruigar6/TFG.git
-    cd TFG
-    ```
+2. **Da permisos de ejecución** 
+   ```bash
+   chmod +x install.sh
+   ```
 
-2. **Instala las dependencias del sistema** (en Ubuntu/Debian):
+3. **Ejecuta el instalador** 
+   ```bash
+   ./install.sh
+   ```
+   Esto:
+   - Actualiza repositorios e instala dependencias de sistema. 
+   - Clona el repositorio (si no existe). 
+   - Crea un entorno virtual Python (`venv/`). 
+   - Prepara el directorio de plantillas en `~/.local/share/virt-manager/templates`. 
+   - Añade tu usuario al grupo `libvirt` (si procede).
 
-    ```bash
-    sudo apt update
-    sudo apt install virt-manager python3-venv python3-gi python3-libvirt gir1.2-gtk-3.0
-    ```
+> **Importante**: Si se te añade al grupo `libvirt`, cierra sesión y vuelve a iniciar para aplicar los permisos.
 
-3. **Activa un entorno virtual Python (`venv`):**
-
-    ```bash
-    source .venv/bin/activate
-    ./virt-manager/virt-manager --debug
-    ```
-
-4. **Lanza Virt-Manager** y sigue las instrucciones del manual de usuario para usar la integración.
-
-
----
-
-## Uso
-
-- Desde Virt-Manager, encontrarás nuevas opciones para **convertir máquinas en plantillas** e **instanciar nuevas VMs a partir de plantillas**.
-- Las plantillas se almacenan en `~/.local/share/virt-manager/templates`.
-- Durante cualquier operación larga (clonación, conversión), se mostrarán **barras de progreso e información contextual**.
-- Consulta el manual de usuario para detalles paso a paso.
+4. **Consulta detalles de preparación** 
+   ```text
+   código/compila.txt
+   ```
 
 ---
+## Ejecución
 
+1. **Accede al paquete ejecutable** 
+   ```bash
+   cd ejecutable
+   ```
+
+2. **Activa el entorno virtual** 
+   ```bash
+   source ../código/venv/bin/activate
+   ```
+
+3. **Comprueba permisos del lanzador** 
+   ```bash
+   ls -l virt-manager/virt-manager
+   # Debe mostrar -rwxr-xr-x
+   ```
+
+4. **Arranca Virt-Manager con la extensión** 
+   ```bash
+   cd virt-manager
+   ./virt-manager --debug
+   ```
+   - El modo `--debug` muestra logs detallados en la terminal.
+
+5. **Usa la extensión desde la GUI** 
+   - **Convertir VM en plantilla**: clic derecho sobre una VM → **Convertir en plantilla** 
+   - **Crear VM desde plantilla**: clic en Archivo → Nueva máquina virtual → **Importar desde plantilla** → selecciona plantilla → ajusta nombre → **Finalizar**.
+
+6. **Verificaciones post-importación** 
+   - Si hay errores, revisa:
+     ```bash
+     ~/.cache/virt-manager/virt-manager.log
+     ```
+
+7. **Cierra la aplicación** 
+   - Cierra la ventana o presiona `Ctrl+C` en la terminal. 
+   - Para salir del entorno virtual:
+     ```bash
+     deactivate
+     ```
+
+---
 ## Documentación
 
-La documentación se irá actualizando conforme avance el desarrollo.
+- **Compilación/preparación**: `código/compila.txt` 
+- **Ejecución**: `ejecutable/ejecuta.txt` 
 
 ---
-
-## Vídeo de demostración
-
-Los videos se irá actualizando conforme avance el desarrollo.
-
----
-
 ## Autoría
 
-Proyecto desarrollado por **Paula Ruiz Gardón**  
-Universidad de Sevilla  
-Tutorizado por **Jose Antonio Pérez Castellano**
+- **Paula Ruiz Gardón** 
+- Universidad de Sevilla 
+- Tutora: **Jose Antonio Pérez Castellano**
 
 ---
-
 ## Contacto
 
-Para cualquier duda o sugerencia:
-
-- GitHub: [https://github.com/pauruigar6](https://github.com/pauruigar6)
-
----
-
+- GitHub: [pauruigar6](https://github.com/pauruigar6) 
