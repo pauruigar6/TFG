@@ -1,0 +1,60 @@
+Instrucciones detalladas de ejecución
+
+Este documento explica cómo lanzar Virt-Manager con la extensión de plantillas desarrollada en este proyecto.
+
+Pasos de ejecución:
+
+1. Accede al directorio ejecutable de la entrega:
+   cd TFG/ejecutable
+
+2. Activa el entorno virtual Python creado durante la instalación:
+   source ../código/venv/bin/activate
+
+   Verás que el prompt de tu terminal cambia, indicando que el entorno virtual está activo.
+
+3. Verifica que el lanzador principal tiene permisos de ejecución:
+   ls -l virt-manager/virt-manager
+
+   Debe aparecer con permisos de ejecución (`-rwxr-xr-x`).
+
+4. Entra en la carpeta de Virt-Manager:
+   cd virt-manager
+
+
+5. Ejecuta Virt-Manager en modo debug para cargar la extensión de plantillas:
+   ./virt-manager --debug
+
+   * El parámetro `--debug` muestra en la terminal mensajes adicionales útiles para diagnosticar problemas.
+
+6. Uso de la extensión de plantillas en la interfaz gráfica:
+
+   * **Convertir VM en plantilla**:
+
+     * Haz clic derecho sobre la VM que desees convertir como plantilla en la lista de máquinas.
+     * Selecciona **“Convertir en plantilla”**, introducza la contaseña de root cuando sea necesario, y confirma.
+   
+   * **Crear VM desde plantilla**:
+
+     * En la barra superior de Virt Manager, haz clic en Archivo y posteriormente en Nueva máquina virtual.
+     * Selecciona **“Importar desde plantilla”**, elige la plantilla e introduze el nombre.
+     * Haz clic en **“Finalizar”** para generar la nueva máquina virtual.
+
+7. Comprobaciones post-importación:
+
+   * Si surgen errores, revisa los logs en:
+     ~/.cache/virt-manager/virt-manager.log
+
+  
+
+8. Cierre de la aplicación:
+
+   * Para salir de Virt-Manager, cierra la ventana de la aplicación o presiona `Ctrl+C` en la terminal.
+   * Para desactivar el entorno virtual cuando termines:
+   deactivate
+
+
+9. Nota de permisos:
+   Si acabas de ser añadido al grupo `libvirt`, cierra sesión y vuelve a iniciar para que los cambios de permisos surtan efecto.
+
+Con estas instrucciones podrás lanzar y utilizar la extensión de plantillas de forma correcta, sin necesidad de definir variables de entorno adicionales.
+
