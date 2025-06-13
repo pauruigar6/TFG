@@ -1,0 +1,49 @@
+Instrucciones de preparación (compilación)
+
+Este proyecto está desarrollado en Python y GTK para Virt-Manager, por lo que no requiere compilación nativa. Sin embargo, es necesario preparar el entorno y las dependencias antes de poder ejecutar la extensión.
+
+1. Sitúate en el directorio de código:
+
+```bash
+   cd código
+   ```
+
+2. Asegúrate de que el script de instalación tiene permisos de ejecución:
+
+```bash
+   chmod +x install.sh
+   ```
+
+3. Ejecuta el script de instalación:
+
+```bash
+   ./install.sh
+   ```
+
+   Esto hará lo siguiente:
+
+   * Actualizará los repositorios del sistema e instalará las dependencias necesarias (GTK, libvirt, Python 3, etc.).
+   * Clonará el repositorio (si no existe) en la carpeta actual.
+   * Creará un entorno virtual Python (venv/) con acceso al sitio global.
+   * Preparará el directorio de plantillas en \~/.local/share/virt-manager/templates.
+   * Añadirá tu usuario al grupo libvirt (si no estaba ya), y te indicará que cierres sesión y vuelvas a entrar si fuese necesario.
+
+4. Verifica que el entorno virtual se ha creado y funciona correctamente:
+
+```bash
+   source venv/bin/activate
+   python3 --version
+   ```
+
+   Deberías ver la versión de Python 3 dentro del entorno virtual.
+
+5. Comprueba que los ficheros fuente están en su lugar:
+
+   * Dentro de código/virt-manager/ deben aparecer todos los módulos y scripts modificados.
+   * El lanzador principal (virt-manager) debe tener permisos de ejecución:
+
+ ```bash  
+     chmod +x virt-manager/virt-manager
+     ```
+
+A partir de este punto, el directorio ejecutable/ estará listo para lanzar la aplicación según las instrucciones de ejecuta.txt.
