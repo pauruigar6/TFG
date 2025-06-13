@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 #
-# template_utils.py: funciones para 'convertir en plantilla' e 'importar desde plantilla'
+# template_utils.py: funciones para 'convertir en plantilla'
 #
 import os
 import shutil
@@ -63,7 +63,6 @@ class TemplateManager:
         self._progress_dialog = None
         self._progress_label = None
         self._progress_bar = None
-        self._last_confirmation = None
 
     def convert_vm_to_template(self, vm_name, template_name=None):
         # Muestra la barra de progreso antes de lanzar el hilo
@@ -120,27 +119,14 @@ class TemplateManager:
                 template_name = vm_name
 
             template_dir = os.path.join(TEMPLATES_ROOT, template_name)
+            # Si la plantilla ya existe, mostrar error y salir
             if os.path.isdir(template_dir):
-                res = GLib.idle_add(
-                    self._ask_confirmation,
-                    f"Ya existe una plantilla llamada '{template_name}'.\n"
-                    "¿Deseas sobrescribirla? Esto eliminará la anterior."
+                GLib.idle_add(self._close_progress_dialog)
+                GLib.idle_add(
+                    self._show_error,
+                    f"No se puede crear la plantilla '{template_name}' porque ya existe."
                 )
-                # Espera respuesta (bloqueante)
-                respuesta = None
-                for _ in range(1000):
-                    respuesta = getattr(self, '_last_confirmation', None)
-                    if isinstance(respuesta, bool):
-                        break
-                    time.sleep(0.01)
-                else:
-                    GLib.idle_add(self._close_progress_dialog)
-                    GLib.idle_add(self._show_error, "Timeout esperando respuesta del usuario.")
-                    return
-                if not respuesta:
-                    GLib.idle_add(self._close_progress_dialog)
-                    return
-                shutil.rmtree(template_dir)
+                return
 
             GLib.idle_add(self._update_progress, 0.05, "Creando carpeta para la plantilla…")
             os.makedirs(template_dir)
@@ -153,6 +139,12 @@ class TemplateManager:
 
             GLib.idle_add(self._update_progress, 0.25, "Analizando definición de la VM…")
             root = ET.fromstring(xml_desc)
+
+            # Eliminar el elemento UUID sin confirmación
+            elem = find_first_elem(root, 'uuid')
+            if elem is not None:
+                root.remove(elem)
+            xml_desc = ET.tostring(root, encoding='unicode')
 
             disk_paths = []
             for disk in root.findall("./devices/disk"):
@@ -200,20 +192,6 @@ class TemplateManager:
             return
 
     # Métodos auxiliares para mostrar diálogos GTK (deben llamarse desde el hilo principal)
-    def _ask_confirmation(self, message):
-        parent = self.topwin
-        dlg = Gtk.MessageDialog(
-            parent=parent,
-            flags=0,
-            message_type=Gtk.MessageType.QUESTION,
-            buttons=Gtk.ButtonsType.YES_NO,
-            text=message
-        )
-        resp = dlg.run()
-        dlg.destroy()
-        self._last_confirmation = (resp == Gtk.ResponseType.YES)
-        return self._last_confirmation
-
     def _show_error(self, message):
         parent = self.topwin
         dlg = Gtk.MessageDialog(
