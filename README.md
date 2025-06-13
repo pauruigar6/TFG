@@ -30,7 +30,10 @@ aportando funcionalidades adicionales a Virt-Manager para usuarios técnicos y n
     - `virt-manager/`: Código de la extensión GTK 
   - **ejecutable/**: Archivos listos para ejecución 
     - `ejecuta.txt`: Instrucciones de lanzamiento de la aplicación 
+<<<<<<< HEAD
     - `virt-manager/`
+=======
+>>>>>>> d65b1f9 (Update: Entrega TFG)
 
 ---
 
@@ -79,6 +82,7 @@ aportando funcionalidades adicionales a Virt-Manager para usuarios técnicos y n
 ---
 ## Ejecución
 
+<<<<<<< HEAD
 1. **Accede al paquete ejecutable** 
    ```bash
    cd ejecutable
@@ -89,6 +93,13 @@ aportando funcionalidades adicionales a Virt-Manager para usuarios técnicos y n
    source ../código/venv/bin/activate
    ```
 
+=======
+1. **Activa el entorno virtual** 
+   ```bash
+   source venv/bin/activate
+   ```
+
+>>>>>>> d65b1f9 (Update: Entrega TFG)
 3. **Comprueba permisos del lanzador** 
    ```bash
    ls -l virt-manager/virt-manager

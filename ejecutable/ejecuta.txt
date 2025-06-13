@@ -4,11 +4,8 @@ Este documento explica cómo lanzar Virt-Manager con la extensión de plantillas
 
 Pasos de ejecución:
 
-1. Accede al directorio ejecutable de la entrega:
-   cd TFG/ejecutable
-
-2. Activa el entorno virtual Python creado durante la instalación:
-   source ../código/venv/bin/activate
+1. Activa el entorno virtual Python creado durante la instalación:
+   source venv/bin/activate
 
    Verás que el prompt de tu terminal cambia, indicando que el entorno virtual está activo.
 

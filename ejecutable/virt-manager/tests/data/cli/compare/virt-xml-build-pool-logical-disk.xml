@@ -1,5 +1,0 @@
-<disk type="volume" device="disk">
-  <driver name="qemu" type="raw"/>
-  <source volume="sdfg1" pool="pool-disk"/>
-  <target dev="vdaf" bus="virtio"/>
-</disk>

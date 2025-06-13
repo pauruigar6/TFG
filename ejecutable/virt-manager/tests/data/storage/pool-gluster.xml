@@ -1,8 +1,0 @@
-<pool type="gluster">
-  <name>pool-gluster</name>
-  <source>
-    <host name="some.random.hostname"/>
-    <dir path="/some/source/path"/>
-    <name>gv0</name>
-  </source>
-</pool>

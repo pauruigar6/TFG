@@ -1,1 +1,0 @@
-subdir('apps')

@@ -1,5 +1,0 @@
-<tpm>
-  <backend type="passthrough">
-    <device path="/dev/tpm"/>
-  </backend>
-</tpm>
